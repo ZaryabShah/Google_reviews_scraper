@@ -1,0 +1,29 @@
+{
+  "extraction_timestamp": "2025-07-01T01:29:31.101646",
+  "source_file": "response.html",
+  "business_data": {
+    "name": "Kim's Island",
+    "address": "175 Main St, Staten Island, NY 10307, United States",
+    "phone": "+1 718-356-5168",
+    "website": "http://kimsislandsi.com/",
+    "category": "Chinese restaurant",
+    "latitude": 40.5107736,
+    "longitude": -74.2482624,
+    "rating": 4.3,
+    "total_reviews": 132,
+    "price_range": "$10–20",
+    "place_id": "0x89c3ca9c11f90c25:0x6cc8dba851799f09",
+    "google_business_id": "111194231570803148728",
+    "hours": {},
+    "service_options": [
+      "Takeout",
+      "Dine-in",
+      "Delivery"
+    ],
+    "neighborhood": "Tottenville",
+    "city": "Staten Island",
+    "state": "NY",
+    "zip_code": "10307",
+    "country": "United States"
+  }
+}
