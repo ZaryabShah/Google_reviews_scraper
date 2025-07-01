@@ -1,0 +1,57 @@
+{
+  "page_number": 12,
+  "timestamp": "2025-07-01T05:59:35.910256",
+  "place_id": "0x89c3ca9c11f90c25:0x6cc8dba851799f09",
+  "current_token_used": "CAESY0NBRVFNUnBFUTJwRlNVRlNTWEJEWjI5QlVEZGZURGhOUkRWdVgxOWZSV2hEUlVWMFNscElkVmx3UW14aFQzRlBZMEZCUVVGQlIyZHVPVjloYzBOcUxXbHpYMlJCV1VGRFNVRQ",
+  "new_reviews_count": 1,
+  "continuation_tokens_found": [
+    "CAESY0NBRVFNaHBFUTJwRlNVRlNTWEJEWjI5QlVEZGZZVEYyUTJaZlgxOWZSV2hEV1VwV1QxQkxVVkZYVERReVEycEJkMEZCUVVGQlIyZHVPVFpXVlVOdWMzRmxVM28wV1VGRFNVRQ",
+    "CAESY0NBRVFNeHBFUTJwRlNVRlNTWEJEWjI5QlVEZGZZbmQxV0dwbVgxOWZSV2hCVUZOQlgwaDRSRlJhU0RSclRIVnpNRUZCUVVGQlIyZHVPUzB4V1VOaGRFcFdUM0puV1VGRFNVRQ",
+    "CAESY0NBRVFOQnBFUTJwRlNVRlNTWEJEWjI5QlVEZGZZakZhZEdabVgxOWZSV2hCUVY5R1dXWmhVSEpvZUhaV2RFNVBhMEZCUVVGQlIyZHVPVjlOVFVOcFRHeHRPRXh2V1VGRFNVRQ",
+    "CAESY0NBRVFOUnBFUTJwRlNVRlNTWEJEWjI5QlVEZGZZakprTlU5UVgxOWZSV2hFUkhkT00zUnlkVmxXVGxCS2NFTXdVVUZCUVVGQlIyZHVPVjlTV1VOaVNIUXhlamxKV1VGRFNVRQ",
+    "CAESY0NBRVFOaHBFUTJwRlNVRlNTWEJEWjI5QlVEZGZZalZVTkZkZlgxOWZSV2hET1hab2NuZzBkRTlvVEdkMWJqVlhiMEZCUVVGQlIyZHVPVjltVVVOalR6QmtWR3h2V1VGRFNVRQ",
+    "CAESY0NBRVFOeHBFUTJwRlNVRlNTWEJEWjI5QlVEZGZZalZpV0hBelgxOWZSV2hEYlRscWNHRnRjVVptWVVFM2VERnlZMEZCUVVGQlIyZHVPVjltTkVOallrUlZTRmxKV1VGRFNVRQ",
+    "CAESY0NBRVFPQnBFUTJwRlNVRlNTWEJEWjI5QlVEZGZZalZ5UTB0ZlgxOWZSV2hFZEMxR1duaEVhbWd5T1ZKS1FrbEliMEZCUVVGQlIyZHVPVjlvUlVOak4xQnplVU5KV1VGRFNVRQ",
+    "CAESY0NBRVFPUnBFUTJwRlNVRlNTWEJEWjI5QlVEZGZZalYzVHpoMlgxOWZSV2hCYjBvMFJIcE5hMW90WTFWYWNESjRhMEZCUVVGQlIyZHVPVjlvWTBOa1JWSkNjbFYzV1VGRFNVRQ",
+    "CAESY0NBRVFPaHBFUTJwRlNVRlNTWEJEWjI5QlVEZGZZalozWVcxWVgxOWZSV2hEVVdVNFgzbE1aVzh3Um5oTVpWUllUVUZCUVVGQlIyZHVPVjl0VlVOb1lXTjZlblZ6V1VGRFNVRQ"
+  ],
+  "continuation_tokens_count": 9,
+  "total_reviews_so_far": 67,
+  "total_tokens_used_so_far": 10,
+  "reviews": [
+    {
+      "reviewerId": "107157457404238856834",
+      "reviewerUrl": "https://www.google.com/maps/contrib/107157457404238856834?hl=en",
+      "reviewerName": "carlos gamboa",
+      "reviewerNumberOfReviews": 0,
+      "reviewerPhotoUrl": "https://lh3.googleusercontent.com/a-/ALV-UjU1LXNSWPjJmPvDsj6sVOG6k8VJE2Y-lKcyEhGvjCzBjr90l8F6XA\\u003ds120-c-rp-mo-ba3-br100",
+      "text": "",
+      "reviewImageUrls": [],
+      "publishedAtDate": null,
+      "lastEditedAtDate": null,
+      "likesCount": 0,
+      "reviewId": "ChZDSUhNMG9nS0VJQ0FnSUN5dk02akNREAE",
+      "reviewUrl": "https://www.google.com/maps/reviews/data=!4m8!14m7!1m6!2m5!1sChZDSUhNMG9nS0VJQ0FnSUN5dk02akNREAE",
+      "stars": 5,
+      "placeId": "0x6cc8dba851799f09",
+      "location": {
+        "lat": 40.0,
+        "lng": 40.0
+      },
+      "address": "",
+      "neighborhood": "",
+      "street": "",
+      "city": "",
+      "postalCode": "",
+      "categories": [],
+      "title": "",
+      "totalScore": 0.0,
+      "url": "",
+      "price": null,
+      "cid": "0x6cc8dba851799f09",
+      "fid": "",
+      "scrapedAt": "2025-07-01T05:59:35.910256",
+      "timeAgo": "a year ago"
+    }
+  ]
+}
