@@ -1,0 +1,9 @@
+# Core dependencies
+aiohttp>=3.8.0
+asyncio
+
+# Optional performance enhancement
+orjson>=3.8.0
+
+# For potential future uvloop optimization (Linux/Mac only)
+# uvloop>=0.17.0; sys_platform != "win32"
