@@ -12,11 +12,11 @@ import asyncio
 import aiohttp
 import json
 import re
+import os
+import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Set, List, Dict, Any, Optional
-import time
-import os
 from urllib.parse import unquote
 
 # Try to use orjson for better performance, fallback to standard json
@@ -49,11 +49,15 @@ class Review:
     reviewerPhotoUrl: str = ""
     reviewerNumberOfReviews: int = 0
     isLocalGuide: bool = False
+    localGuideLevel: Optional[int] = None
     sortDirection: str = ""
     extractionConfidence: float = 1.0
     timeAgo: str = ""
     hasImages: bool = False
     hasOwnerResponse: bool = False
+    businessId: str = ""
+    reviewUrl: str = ""
+    extraUrls: List[str] = field(default_factory=list)
 
 class OptimizedGoogleMapsReviewScraper:
     """Optimized scraper using producer-consumer pattern and JSON parsing"""
@@ -156,16 +160,15 @@ class OptimizedGoogleMapsReviewScraper:
                         return found
         return None
 
-    def _find_likes(self, block: list) -> int:
-        """Return the first `[1, n]` we meet (n may be 0)."""
-        if isinstance(block, list):
-            for item in block:
-                if isinstance(item, list) and len(item) == 2 and item[0] == 1:
-                    return int(item[1])
-                if isinstance(item, list):
-                    n = self._find_likes(item)
-                    if n is not None:
-                        return n
+    def _find_likes_anywhere(self, tree) -> int:
+        """Find likes count anywhere in the review data using iterative search"""
+        stack = [tree]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, list):
+                if len(node) == 2 and node[0] == 1 and isinstance(node[1], int):
+                    return node[1]
+                stack.extend(node)
         return 0
 
     def _long_strings(self, block, path=()):
@@ -175,6 +178,29 @@ class OptimizedGoogleMapsReviewScraper:
                 yield from self._long_strings(item, path + (i,))
         elif isinstance(block, str) and len(block) > 40:
             yield block, path
+
+    def _find_owner_reply(self, buckets: list) -> str:
+        """Find owner response in text buckets"""
+        for i, b in enumerate(buckets[:-1]):
+            if (isinstance(b, list) and isinstance(b[0], str) and len(b[0]) == 2   # language tag
+                and isinstance(buckets[i+1], list) and isinstance(buckets[i+1][0], list)
+                and isinstance(buckets[i+1][0][0], str)):
+                reply = buckets[i+1][0][0]
+                if any(w in reply.lower() for w in ("thank", "sorry", "appreciate", "glad")):
+                    return reply
+        return None
+
+    def _collect_urls(self, tree) -> list:
+        """Collect all HTTPS URLs from the review data"""
+        urls = []
+        stack = [tree]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, str) and n.startswith("https://"):
+                urls.append(n)
+            elif isinstance(n, list):
+                stack.extend(n)
+        return urls
 
     def fast_parse_review(self, review_data: List[Any], direction: str) -> Optional[Review]:
         """Fast JSON-based review parsing using corrected stable index map"""
@@ -210,23 +236,45 @@ class OptimizedGoogleMapsReviewScraper:
 
             user_name, profile_img, _, user_id = user_block[:4]
             total_reviews = user_block[5] if len(user_block) > 5 else 0
-            is_local_guide = bool(user_block[12] if len(user_block) > 12 else 0)
+            
+            # Enhanced local guide detection
+            is_local_guide = any(
+                isinstance(x, str) and "local guide" in x.lower()
+                for x in user_block
+            )
+            guide_level = None
+            if is_local_guide:
+                import re
+                m = re.search(r"local guide\s*·\s*(\d+)", " ".join(map(str, user_block)).lower())
+                if m:
+                    guide_level = int(m.group(1))
 
-            # ------- likes, images, replies ----------------------------------------
-            likes = self._find_likes(meta)
+            # ------- likes, images, replies, URLs ----------------------------------------
+            likes = self._find_likes_anywhere(review_data)  # Search whole review_data
             images = [s for s, p in self._long_strings(meta)
                       if s.startswith("https://lh3.googleusercontent.com/geougc-cs")
                       or s.startswith("https://lh3.googleusercontent.com/places/")]
 
-            owner_response = None
-            if text_bucket_idx is not None and text_bucket_idx + 1 < len(meta[2]):
-                reply_bucket = meta[2][text_bucket_idx + 1]
-                if (isinstance(reply_bucket, list) and reply_bucket
-                    and isinstance(reply_bucket[0], list)
-                    and reply_bucket[0] and isinstance(reply_bucket[0][0], str)):
-                    resp = reply_bucket[0][0]
-                    if any(w in resp.lower() for w in ("thank", "sorry", "appreciate", "glad")):
-                        owner_response = resp
+            # Enhanced owner response detection
+            owner_response = self._find_owner_reply(meta[2]) if len(meta) > 2 else None
+
+            # Collect all URLs
+            all_urls = self._collect_urls(review_data)
+            review_url = ""
+            extra_urls = []
+            
+            for url in all_urls:
+                if "reviews/data" in url and not review_url:
+                    review_url = url
+                else:
+                    extra_urls.append(url)
+            
+            # Extract business ID (CID format)
+            business_id = ""
+            for item in self._long_strings(meta):
+                if isinstance(item[0], str) and item[0].startswith("0x0:0x"):
+                    business_id = item[0]
+                    break
 
             # ------- timestamps -----------------------------------------------------
             micros = self.safe_get_nested(meta, 1, 2)  # 3rd item inside meta[1]
@@ -247,11 +295,15 @@ class OptimizedGoogleMapsReviewScraper:
                 reviewerPhotoUrl=profile_img,
                 reviewerNumberOfReviews=int(total_reviews or 0),
                 isLocalGuide=is_local_guide,
+                localGuideLevel=guide_level,
                 sortDirection=direction,
                 extractionConfidence=1.0,
                 timeAgo="",  # add if you need it
                 hasImages=bool(images),
                 hasOwnerResponse=owner_response is not None,
+                businessId=business_id,
+                reviewUrl=review_url,
+                extraUrls=extra_urls,
             )
             
         except Exception as e:
