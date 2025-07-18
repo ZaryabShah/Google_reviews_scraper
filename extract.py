@@ -1,17 +1,32 @@
-import asyncio
-import aiohttp
-import json
-import re
-from urllib.parse import unquote
-from datetime import datetime
-import traceback
-import time
+#!/usr/bin/env python3
+"""
+Google Maps Review Extractor - Command Line Interface
+
+Usage:
+    python extract.py "GOOGLE_MAPS_URL" --google
+    python extract.py "GOOGLE_MAPS_URL" --tripadvisor
+    python extract.py "GOOGLE_MAPS_URL" --all
+
+Examples:
+    python extract.py "https://www.google.com/maps/place/Kim's+Island/@40.5104636,-74.2434344,16z/data=!4m8!3m7!1s0x89c3ca9c11f90c25:0x6cc8dba851799f09!8m2!3d40.5107736!4d-74.2482624!9m1!1b1!16s%2Fg%2F1tmgdcj8?entry=ttu&g_ep=EgoyMDI1MDYyMy4yIKXMDSoASAFQAw%3D%3D" --google
+    
+    python extract.py "https://www.google.com/maps/place/citizenM+Paris+Gare+de+Lyon+hotel/@48.8613388,2.2997173,12168m/data=!3m2!1e3!5s0x47e6721b7cb20c37:0xd1904031ebca8f50!4m18!1m5!2m4!1shotel+paris!5m2!5m1!1s2025-07-18!3m11!1s0x47e6721b7d55567d:0xaa8fe344e1e346b3!5m3!1s2025-07-18!4m1!1i2!8m2!3d48.8434163!4d2.3716691!9m1!1b1!16s%2Fg%2F11dxnn2fwx?entry=ttu&g_ep=EgoyMDI1MDcxMy4wIKXMDSoASAFQAw%3D%3D" --tripadvisor
+"""
+
+import sys
 import os
-import threading
-from typing import Set, List, Dict, Any
+
+# Add the current directory to the Python path so we can import our scraper
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Import the main function from our updated scraper
+from dual_async_scraper_v3 import main
+
+if __name__ == "__main__":
+    main()
 
 class DualAsyncGoogleMapsReviewScraper:
-    def __init__(self, place_id):
+    def __init__(self, place_id, allowed_sources: list[str] | None = None):
         self.place_id = place_id.replace("0x", "") if place_id.startswith("0x") else place_id
         self.base_url = "https://www.google.com/maps/rpc/listugcposts"
         self.headers = {
@@ -26,6 +41,10 @@ class DualAsyncGoogleMapsReviewScraper:
             "sec-ch-ua": "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\"",
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         }
+        
+        # ⬇️  keep lowercase for case-insensitive matching; None == "all"
+        self.allowed_sources = None if (allowed_sources in (None, [], ['all'])) \
+                               else [s.lower() for s in allowed_sources]
         
         # Shared state between both scrapers
         self.all_reviews = []
@@ -87,24 +106,13 @@ class DualAsyncGoogleMapsReviewScraper:
         return None
 
     def extract_caesy_tokens(self, html_content):
-        """Extract all continuation tokens starting with CAE (includes CAESY0, CAES, CAE patterns)"""
-        # Multiple patterns to catch different token formats
-        patterns = [
-            r'CAESY0[A-Za-z0-9_\-+=]{10,}',  # Original CAESY0 tokens
-            r'CAESY[A-Za-z0-9_\-+=]{10,}',   # CAESY tokens without 0
-            r'CAES[A-Za-z0-9_\-+=]{15,}',    # CAES tokens (longer minimum)
-            r'CAE[A-Za-z0-9_\-+=]{20,}',     # General CAE tokens (even longer minimum)
-        ]
-        
-        all_tokens = []
-        for pattern in patterns:
-            tokens = re.findall(pattern, html_content)
-            all_tokens.extend(tokens)
+        """Extract all tokens starting with CAESY0"""
+        caesy_tokens = re.findall(r'CAESY0[A-Za-z0-9_\-+=]{10,}', html_content)
         
         # Remove duplicates while preserving order
         unique_tokens = []
         seen = set()
-        for token in all_tokens:
+        for token in caesy_tokens:
             if token not in seen:
                 unique_tokens.append(token)
                 seen.add(token)
@@ -454,6 +462,31 @@ class DualAsyncGoogleMapsReviewScraper:
             return texts[1]  # Default to second text
         return None
 
+    def extract_review_source(self, section: str) -> dict:
+        """
+        Extract the review source (e.g. google, tripadvisor) that Google embeds
+        in every review bucket:
+            ["Tripadvisor", "https://…icon.png", 100532569, "tripadvisor", 5]
+            ["Google",      "https://…googleg_48dp.png", null, "google", 5]
+        Returns  {"code": "tripadvisor", "name": "Tripadvisor"}  or
+                 {"code": "unknown",     "name": "Unknown"}.
+        """
+        pat = re.compile(
+            r'\["([^"]+)","https://[^"]+",[^,\]]+,"([^"]+)",\d+\]', re.I
+        )
+        m = pat.search(section)
+        if m:
+            name, code = m.groups()
+            return {"code": code.lower(), "name": name}
+        # fall-back: try to catch a lone keyword
+        m = re.search(
+            r'"(tripadvisor|google|booking|expedia|agoda|hotels|facebook|yelp)"',
+            section, re.I)
+        if m:
+            code = m.group(1).lower()
+            return {"code": code, "name": code.capitalize()}
+        return {"code": "unknown", "name": "Unknown"}
+
     def extract_single_review(self, section):
         """Extract comprehensive data for a single review"""
         review = {}
@@ -465,6 +498,11 @@ class DualAsyncGoogleMapsReviewScraper:
         review['date_info'] = self.extract_date_info(section)
         review['business_info'] = self.extract_business_info(section)
         review['features'] = self.extract_review_features(section)
+        
+        # ---------- review source ----------
+        source_info = self.extract_review_source(section)
+        review['source']       = source_info['code']     #  e.g. "google"
+        review['source_name']  = source_info['name']     #  e.g. "Google"
         
         # Review content
         texts = self.extract_review_text(section)
@@ -555,6 +593,11 @@ class DualAsyncGoogleMapsReviewScraper:
                 try:
                     # Extract comprehensive review data using enhanced parser
                     enhanced_review = self.extract_single_review(section)
+                    
+                    # Skip if user filtered sources and this one isn't selected
+                    if (self.allowed_sources is not None and
+                            enhanced_review.get('source') not in self.allowed_sources):
+                        continue
                     
                     # Enhanced validation - require at least one meaningful field
                     has_user = bool(enhanced_review.get('user_info', {}).get('name'))
@@ -745,17 +788,27 @@ class DualAsyncGoogleMapsReviewScraper:
                 if caesy_tokens:
                     print(f"[{sort_direction}] Found {len(caesy_tokens)} continuation tokens")
                     
-                    # Get next unused token
-                    next_token = self.get_next_unused_token(caesy_tokens, used_tokens)
+                    # Always use the LAST token from this response (most recent)
+                    next_token = caesy_tokens[-1]  # Get the last token
                     
-                    if next_token:
+                    # Check if we've already used this token (avoid infinite loops)
+                    if next_token in used_tokens:
+                        print(f"[{sort_direction}] Last token already used, trying previous tokens...")
+                        # Try tokens from end to beginning until we find an unused one
+                        next_token = None
+                        for token in reversed(caesy_tokens):
+                            if token not in used_tokens:
+                                next_token = token
+                                break
+                    
+                    if next_token and next_token not in used_tokens:
                         # Mark current token as used if we have one
                         if continuation_token:
                             used_tokens.add(continuation_token)
                             print(f"[{sort_direction}] Marked token as used: {continuation_token[:50]}...")
                         
                         continuation_token = next_token
-                        print(f"[{sort_direction}] Using next unused token: {continuation_token[:50]}...")
+                        print(f"[{sort_direction}] Using continuation token: {continuation_token[:50]}...")
                         print(f"[{sort_direction}] Total tokens used so far: {len(used_tokens)}")
                     else:
                         print(f"[{sort_direction}] All available tokens have been used, stopping...")
@@ -837,21 +890,155 @@ class DualAsyncGoogleMapsReviewScraper:
         print(f"Reviews output file: {self.output_file}")
         print(f"Tokens output file: {self.tokens_file}")
 
+def extract_place_id_from_url(url):
+    """Extract place ID from Google Maps URL"""
+    try:
+        # Pattern 1: Standard format with place ID in the path
+        # e.g., https://www.google.com/maps/place/.../@lat,lng,zoom/data=!...!1s0x47e6721b7d55567d:0xaa8fe344e1e346b3...
+        place_id_match = re.search(r'!1s(0x[a-fA-F0-9]+:[0x[a-fA-F0-9]+)', url)
+        if place_id_match:
+            place_id = place_id_match.group(1)
+            print(f"✅ Extracted place ID from URL: {place_id}")
+            return place_id
+        
+        # Pattern 2: Place ID in data parameter
+        place_id_match = re.search(r'1s(0x[a-fA-F0-9]+%3A0x[a-fA-F0-9]+)', url)
+        if place_id_match:
+            place_id = urllib.parse.unquote(place_id_match.group(1))
+            print(f"✅ Extracted place ID from URL (encoded): {place_id}")
+            return place_id
+        
+        # Pattern 3: Place ID directly in the URL path
+        place_id_match = re.search(r'/place/[^/]+/(0x[a-fA-F0-9]+:[0x[a-fA-F0-9]+)', url)
+        if place_id_match:
+            place_id = place_id_match.group(1)
+            print(f"✅ Extracted place ID from URL path: {place_id}")
+            return place_id
+            
+        # Pattern 4: CID format
+        cid_match = re.search(r'!1s(0x[a-fA-F0-9]+:[0x[a-fA-F0-9]+)', url)
+        if cid_match:
+            place_id = cid_match.group(1)
+            print(f"✅ Extracted place ID (CID format): {place_id}")
+            return place_id
+        
+        print("❌ Could not extract place ID from URL")
+        print("Please make sure the URL contains a place ID like: 0x123abc:0x456def")
+        return None
+        
+    except Exception as e:
+        print(f"❌ Error extracting place ID: {e}")
+        return None
+
+def save_tripadvisor_reviews(reviews, place_id):
+    """Save reviews in the required clean JSON format"""
+    # Filter only TripAdvisor reviews
+    tripadvisor_reviews = [r for r in reviews if r.get('source') == 'tripadvisor']
+    
+    # Convert to clean format
+    clean_reviews = []
+    for review in tripadvisor_reviews:
+        clean_review = {
+            "user": review.get('reviewerName', 'Unknown'),
+            "rating": review.get('stars'),
+            "published_at": review.get('publishedAtDate', ''),
+            "source": review.get('source', 'tripadvisor'),
+            "content": review.get('text', '')
+        }
+        clean_reviews.append(clean_review)
+    
+    # Create output filename
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"tripadvisor_reviews_{place_id.replace(':', '_')}_{timestamp}.json"
+    
+    # Save to file
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump({
+                "place_id": place_id,
+                "source_filter": "tripadvisor",
+                "total_reviews": len(clean_reviews),
+                "extraction_timestamp": datetime.now().isoformat(),
+                "reviews": clean_reviews
+            }, f, indent=2, ensure_ascii=False)
+        
+        print(f"\n✅ SUCCESS!")
+        print(f"📁 Saved {len(clean_reviews)} TripAdvisor reviews to: {filename}")
+        return filename
+    except Exception as e:
+        print(f"❌ Error saving reviews: {e}")
+        return None
+
 def main():
-    # Get place ID from user input
-    place_id = input("Enter the place ID (e.g., 89c3ca9c11f90c25:0x6cc8dba851799f09): ").strip()
+    parser = argparse.ArgumentParser(description='Extract Google Maps reviews filtered by source')
+    parser.add_argument('url', help='Google Maps place URL')
+    parser.add_argument('--tripadvisor', action='store_true', help='Extract only TripAdvisor reviews')
+    parser.add_argument('--source', type=str, help='Extract reviews from specific source (e.g., tripadvisor, booking)')
+    
+    args = parser.parse_args()
+    
+    print("🔍 Google Maps TripAdvisor Review Extractor")
+    print("=" * 50)
+    
+    # Extract place ID from URL
+    place_id = extract_place_id_from_url(args.url)
+    if not place_id:
+        print("❌ Failed to extract place ID from URL")
+        sys.exit(1)
     
     # Clean the place ID
-    if place_id.startswith("1s0x"):
-        place_id = place_id[4:]  # Remove "1s0x" prefix
-    elif place_id.startswith("0x"):
+    if place_id.startswith("0x"):
         place_id = place_id[2:]  # Remove "0x" prefix
     
-    # Create scraper instance and start dual scraping
-    scraper = DualAsyncGoogleMapsReviewScraper(place_id)
+    # Determine source filter
+    allowed_sources = None
+    if args.tripadvisor:
+        allowed_sources = ['tripadvisor']
+        print("🎯 Filtering for: TripAdvisor reviews only")
+    elif args.source:
+        allowed_sources = [args.source.lower()]
+        print(f"🎯 Filtering for: {args.source} reviews only")
+    else:
+        print("🎯 No source filter applied - extracting all reviews")
     
-    # Run the async scraping
-    asyncio.run(scraper.scrape_all_reviews_dual())
+    # Create scraper instance
+    scraper = DualAsyncGoogleMapsReviewScraper(place_id, allowed_sources=allowed_sources)
+    
+    # Override the save method to use our clean format
+    original_save = scraper.save_results_to_files
+    
+    def custom_save():
+        if args.tripadvisor or (args.source and args.source.lower() == 'tripadvisor'):
+            # Save in clean format for TripAdvisor
+            save_tripadvisor_reviews(scraper.all_reviews, f"0x{place_id}")
+        else:
+            # Use original save method
+            original_save()
+    
+    scraper.save_results_to_files = custom_save
+    
+    try:
+        # Run the async scraping
+        print(f"\n🚀 Starting extraction for place ID: 0x{place_id}")
+        asyncio.run(scraper.scrape_all_reviews_dual())
+        
+        if args.tripadvisor or (args.source and args.source.lower() == 'tripadvisor'):
+            tripadvisor_count = len([r for r in scraper.all_reviews if r.get('source') == 'tripadvisor'])
+            print(f"\n📊 SUMMARY:")
+            print(f"Total reviews found: {len(scraper.all_reviews)}")
+            print(f"TripAdvisor reviews: {tripadvisor_count}")
+            
+            if tripadvisor_count == 0:
+                print("⚠️  No TripAdvisor reviews found for this location")
+                print("   This location might not have TripAdvisor reviews aggregated by Google")
+        
+    except KeyboardInterrupt:
+        print("\n❌ Extraction cancelled by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Error during extraction: {e}")
+        traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

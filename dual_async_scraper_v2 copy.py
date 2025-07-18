@@ -79,32 +79,20 @@ class DualAsyncGoogleMapsReviewScraper:
         }
     
     def get_next_unused_token(self, available_tokens, used_tokens_set):
-        """Get the last unused continuation token from available tokens"""
-        # Iterate from the end to get the last unused token
-        for token in reversed(available_tokens):
+        """Get the next unused continuation token from available tokens"""
+        for token in available_tokens:
             if token not in used_tokens_set:
                 return token
         return None
 
     def extract_caesy_tokens(self, html_content):
-        """Extract all continuation tokens starting with CAE (includes CAESY0, CAES, CAE patterns)"""
-        # Multiple patterns to catch different token formats
-        patterns = [
-            r'CAESY0[A-Za-z0-9_\-+=]{10,}',  # Original CAESY0 tokens
-            r'CAESY[A-Za-z0-9_\-+=]{10,}',   # CAESY tokens without 0
-            r'CAES[A-Za-z0-9_\-+=]{15,}',    # CAES tokens (longer minimum)
-            r'CAE[A-Za-z0-9_\-+=]{20,}',     # General CAE tokens (even longer minimum)
-        ]
-        
-        all_tokens = []
-        for pattern in patterns:
-            tokens = re.findall(pattern, html_content)
-            all_tokens.extend(tokens)
+        """Extract all tokens starting with CAESY0"""
+        caesy_tokens = re.findall(r'CAES[A-Za-z0-9_\-+=]{10,}', html_content)
         
         # Remove duplicates while preserving order
         unique_tokens = []
         seen = set()
-        for token in all_tokens:
+        for token in caesy_tokens:
             if token not in seen:
                 unique_tokens.append(token)
                 seen.add(token)
@@ -114,7 +102,7 @@ class DualAsyncGoogleMapsReviewScraper:
     def find_caesy_tokens(self, html_content):
         """Find all CAESY tokens in the HTML content"""
         # Pattern to match CAESY tokens 
-        pattern = r'"(CAESY[^"]*)"'
+        pattern = r'"(CAES[^"]*)"'
         tokens = re.findall(pattern, html_content)
         return tokens
     
@@ -303,21 +291,31 @@ class DualAsyncGoogleMapsReviewScraper:
         """Extract comprehensive date information"""
         date_info = {}
         
-        # Patterns for relative dates
+        # Enhanced patterns for relative dates with better coverage
         relative_patterns = [
-            r'"(\d+)\s*years?\s*ago"',
-            r'"(\d+)\s*months?\s*ago"',
-            r'"(\d+)\s*weeks?\s*ago"',
-            r'"(\d+)\s*days?\s*ago"',
+            r'"(\d+\s*years?\s*ago)"',
+            r'"(\d+\s*months?\s*ago)"', 
+            r'"(\d+\s*weeks?\s*ago)"',
+            r'"(\d+\s*days?\s*ago)"',
             r'"(a\s*year\s*ago)"',
             r'"(a\s*month\s*ago)"',
-            r'"(Edited[^"]*)"',
+            r'"(a\s*week\s*ago)"',
+            r'"(a\s*day\s*ago)"',
+            r'"(Edited\s+a\s+month\s+ago)"',
+            r'"(Edited\s+\d+\s*(?:years?|months?|weeks?|days?)\s*ago)"',
+            r'"(Edited[^"]*ago)"',
+            # More flexible patterns
+            r'null,"([^"]*(?:years?|months?|weeks?|days?)\s*ago)"',
+            r'null,"([^"]*year\s*ago)"',
+            r'null,"([^"]*month\s*ago)"',
+            r'null,"([^"]*week\s*ago)"',
+            r'null,"([^"]*day\s*ago)"',
         ]
         
         for pattern in relative_patterns:
-            matches = re.findall(pattern, section)
+            matches = re.findall(pattern, section, re.IGNORECASE)
             if matches:
-                date_info['relative_date'] = matches[0]
+                date_info['relative_date'] = matches[0].strip()
                 break
         
         # Look for timestamp patterns
@@ -340,6 +338,57 @@ class DualAsyncGoogleMapsReviewScraper:
                     continue
         
         return date_info
+
+    def extract_review_source(self, section):
+        """Extract review source information (Google, Tripadvisor, etc.)"""
+        source_info = {}
+        
+        # Pattern to extract source information from structured data
+        # Looking for patterns like: ["Google","url",null,"google",5] or ["Tripadvisor","url",123,"tripadvisor",5]
+        source_patterns = [
+            r'\["(Google)","[^"]*","[^"]*","google",\d+\]',
+            r'\["(Tripadvisor)","[^"]*",(?:\d+|null),"tripadvisor",\d+\]',
+            r'\["([^"]+)","[^"]*",(?:\d+|null),"([^"]+)",\d+\]',
+            # More flexible patterns
+            r'null,\["([^"]+)","[^"]*googleusercontent[^"]*"',  # Google profile images
+            r'null,\["([^"]+)","[^"]*tripadvisor[^"]*"',       # TripAdvisor URLs
+        ]
+        
+        for pattern in source_patterns:
+            matches = re.findall(pattern, section, re.IGNORECASE)
+            if matches:
+                if isinstance(matches[0], tuple):
+                    source_name = matches[0][0]
+                else:
+                    source_name = matches[0]
+                
+                # Normalize source names
+                source_name_lower = source_name.lower()
+                if 'google' in source_name_lower:
+                    source_info['source'] = 'Google'
+                    source_info['source_type'] = 'google'
+                elif 'tripadvisor' in source_name_lower:
+                    source_info['source'] = 'Tripadvisor'
+                    source_info['source_type'] = 'tripadvisor'
+                else:
+                    source_info['source'] = source_name
+                    source_info['source_type'] = source_name_lower
+                break
+        
+        # If no structured source found, try to infer from URLs
+        if not source_info.get('source'):
+            if 'tripadvisor.com' in section or 'tripadvisor.de' in section:
+                source_info['source'] = 'Tripadvisor'
+                source_info['source_type'] = 'tripadvisor'
+            elif 'google.com' in section or 'googleusercontent.com' in section:
+                source_info['source'] = 'Google'
+                source_info['source_type'] = 'google'
+            else:
+                # Default to Google if no clear source is found
+                source_info['source'] = 'Google'
+                source_info['source_type'] = 'google'
+        
+        return source_info
 
     def extract_business_info(self, section):
         """Extract business/location information"""
@@ -463,6 +512,7 @@ class DualAsyncGoogleMapsReviewScraper:
         review['likes_count'] = self.extract_likes_count(section)
         review['user_info'] = self.extract_user_info(section)
         review['date_info'] = self.extract_date_info(section)
+        review['source_info'] = self.extract_review_source(section)  # New field
         review['business_info'] = self.extract_business_info(section)
         review['features'] = self.extract_review_features(section)
         
@@ -588,8 +638,8 @@ class DualAsyncGoogleMapsReviewScraper:
                             print(f"[{sort_direction}] Duplicate found (reviewer: {reviewer_id}). Duplicates in this request: {duplicates_in_request}")
                             
                             # Check if THIS REQUEST has too many duplicates
-                            if duplicates_in_request > 500:
-                                print(f"[{sort_direction}] STOPPING: More than 500 duplicates found in this single request!")
+                            if duplicates_in_request > 100:
+                                print(f"[{sort_direction}] STOPPING: More than 15 duplicates found in this single request!")
                                 self.stop_scraping = True
                                 break
                             continue
@@ -600,6 +650,7 @@ class DualAsyncGoogleMapsReviewScraper:
                     
                     # Convert enhanced review to existing format for compatibility
                     date_info = enhanced_review.get('date_info', {})
+                    source_info = enhanced_review.get('source_info', {})
                     published_date = date_info.get('iso_date', datetime.now().isoformat())
                     
                     review = {
@@ -637,6 +688,11 @@ class DualAsyncGoogleMapsReviewScraper:
                         "timeAgo": date_info.get('relative_date', ''),
                         "sortDirection": sort_direction,  # Track which direction this came from
                         
+                        # NEW FIELDS - Source and Timing Information
+                        "reviewSource": source_info.get('source', 'Google'),  # Main source field
+                        "reviewSourceType": source_info.get('source_type', 'google'),  # Source identifier
+                        "reviewTiming": date_info.get('relative_date', ''),  # Timing field (duplicate of timeAgo for clarity)
+                        
                         # Enhanced fields from new parser
                         "isLocalGuide": user_info.get('is_local_guide', False),
                         "localGuideLevel": user_info.get('local_guide_level', None),
@@ -646,6 +702,8 @@ class DualAsyncGoogleMapsReviewScraper:
                         "extractionConfidence": self.calculate_confidence(enhanced_review),
                         "features": enhanced_review.get('features', {}),
                         "businessInfo": enhanced_review.get('business_info', {}),
+                        "sourceInfo": source_info,  # Complete source information
+                        "dateInfo": date_info,  # Complete date information
                         "sectionIndex": i
                     }
                     
@@ -659,7 +717,9 @@ class DualAsyncGoogleMapsReviewScraper:
                     user_name = user_info.get('name', 'Unknown')
                     rating = enhanced_review.get('rating', 'N/A')
                     confidence = self.calculate_confidence(enhanced_review)
-                    print(f"[{sort_direction}] Extracted review {new_reviews_count}: {user_name} (Rating: {rating}, Confidence: {confidence:.2f})")
+                    source = source_info.get('source', 'Unknown')
+                    timing = date_info.get('relative_date', 'Unknown')
+                    print(f"[{sort_direction}] Extracted review {new_reviews_count}: {user_name} (Rating: {rating}, Source: {source}, Timing: {timing}, Confidence: {confidence:.2f})")
                     
                 except Exception as e:
                     print(f"[{sort_direction}] Error parsing section {i}: {str(e)}")

@@ -10,7 +10,7 @@ import os
 import threading
 from typing import Set, List, Dict, Any
 
-class DualAsyncGoogleMapsReviewScraper:
+class GoogleMapsReviewScraper:
     def __init__(self, place_id):
         self.place_id = place_id.replace("0x", "") if place_id.startswith("0x") else place_id
         self.base_url = "https://www.google.com/maps/rpc/listugcposts"
@@ -27,45 +27,30 @@ class DualAsyncGoogleMapsReviewScraper:
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         }
         
-        # Shared state between both scrapers
+        # Scraper state
         self.all_reviews = []
         self.seen_review_ids = set()
         self.seen_reviewer_ids = set()  # Track reviewer IDs for duplicate detection
         self.duplicate_count = 0
-        self.stop_scraping = False
-        self.lock = threading.Lock()  # Thread safety for shared state
-        
-        # Separate tracking for each direction
-        self.used_tokens_highest = set()
-        self.used_tokens_lowest = set()
+        self.used_tokens = set()  # Track used continuation tokens
         
         # File setup
         script_dir = os.path.dirname(os.path.abspath(__file__))
         clean_place_id = self.place_id.replace(":", "_")
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.output_file = os.path.join(script_dir, f"dual_reviews_{clean_place_id}_{timestamp}.json")
-        self.tokens_file = os.path.join(script_dir, f"dual_tokens_{clean_place_id}_{timestamp}.json")
+        self.output_file = os.path.join(script_dir, f"reviews_{clean_place_id}_{timestamp}.json")
+        self.tokens_file = os.path.join(script_dir, f"tokens_{clean_place_id}_{timestamp}.json")
         
         # Track all tokens for debugging
-        self.all_tokens = {
-            'highest_rating': [],
-            'lowest_rating': []
-        }
+        self.all_tokens = []
         
-        # Track stats per direction
-        self.stats = {
-            'highest_rating': {'pages': 0, 'reviews': 0, 'duplicates': 0},
-            'lowest_rating': {'pages': 0, 'reviews': 0, 'duplicates': 0}
-        }
+        # Track stats
+        self.stats = {'pages': 0, 'reviews': 0, 'duplicates': 0}
         
-    def build_querystring(self, continuation_token=None, sort_by_highest=True):
-        """Build the querystring for the request with different sorting"""
-        # Different sort orders:
-        # 1e1 = Most relevant (default)
-        # 1e2 = Newest first  
-        # 1e3 = Highest rating first
-        # 1e4 = Lowest rating first
-        sort_value = "1e3" if sort_by_highest else "1e4"
+    def build_querystring(self, continuation_token=None):
+        """Build the querystring for the request with highest rating sorting"""
+        # Using 1e3 = Highest rating first
+        sort_value = "1e3"
         
         if continuation_token:
             pb_value = f"!1m6!1s0x{self.place_id}!6m4!4m1!1e1!4m1!1e3!2m2!1i20!2s{continuation_token}!5m2!1sStliaIi6EPWA9u8PwLTBwAE!7e81!8m9!2b1!3b1!5b1!7b1!12m4!1b1!2b1!4m1!1e1!11m0!13m1!{sort_value}"
@@ -87,7 +72,7 @@ class DualAsyncGoogleMapsReviewScraper:
 
     def extract_caesy_tokens(self, html_content):
         """Extract all tokens starting with CAESY0"""
-        caesy_tokens = re.findall(r'CAESY0[A-Za-z0-9_\-+=]{10,}', html_content)
+        caesy_tokens = re.findall(r'CAES[A-Za-z0-9_\-+=]{10,}', html_content)
         
         # Remove duplicates while preserving order
         unique_tokens = []
@@ -102,7 +87,7 @@ class DualAsyncGoogleMapsReviewScraper:
     def find_caesy_tokens(self, html_content):
         """Find all CAESY tokens in the HTML content"""
         # Pattern to match CAESY tokens 
-        pattern = r'"(CAESY[^"]*)"'
+        pattern = r'"(CAES[^"]*)"'
         tokens = re.findall(pattern, html_content)
         return tokens
     
@@ -524,17 +509,17 @@ class DualAsyncGoogleMapsReviewScraper:
         
         return place_data
 
-    def parse_reviews_from_response(self, html_content, sort_direction):
+    def parse_reviews_from_response(self, html_content):
         """Parse reviews from the HTML response using enhanced CAESY token parsing"""
         reviews = []
         place_data = self.extract_place_id_and_coordinates(html_content)
         
         try:
-            print(f"[{sort_direction}] Extracting reviews using enhanced CAESY parsing...")
+            print("Extracting reviews using enhanced CAESY parsing...")
             
             # Use the enhanced parsing method - extract review sections
             sections = self.extract_review_sections(html_content)
-            print(f"[{sort_direction}] Found {len(sections)} review sections")
+            print(f"Found {len(sections)} review sections")
             
             new_reviews_count = 0
             duplicates_in_request = 0  # Track duplicates for THIS request only
@@ -558,33 +543,26 @@ class DualAsyncGoogleMapsReviewScraper:
                     reviewer_id = user_info.get('user_id', f"reviewer_{i}_{int(time.time())}")
                     review_id = f"enhanced_review_{i}_{int(time.time())}"
                     
-                    with self.lock:
-                        # Check if we should stop
-                        if self.stop_scraping:
-                            print(f"[{sort_direction}] Stopping due to duplicate limit reached")
+                    
+                    # Check if we've seen this reviewer before
+                    if reviewer_id in self.seen_reviewer_ids:
+                        duplicates_in_request += 1
+                        self.duplicate_count += 1  # Still track total for stats
+                        
+                        # Update stats  
+                        self.stats['duplicates'] += 1
+                        
+                        print(f"Duplicate found (reviewer: {reviewer_id}). Duplicates in this request: {duplicates_in_request}")
+                        
+                        # Check if THIS REQUEST has too many duplicates (stop condition)
+                        if duplicates_in_request > 100:
+                            print(f"STOPPING: More than 100 duplicates found in this single request!")
                             break
-                        
-                        # Skip if we've already seen this reviewer
-                        if reviewer_id in self.seen_reviewer_ids:
-                            duplicates_in_request += 1
-                            self.duplicate_count += 1  # Still track total for stats
-                            
-                            # Update per-direction stats  
-                            stats_key = 'highest_rating' if sort_direction == 'HIGHEST' else 'lowest_rating'
-                            self.stats[stats_key]['duplicates'] += 1
-                            
-                            print(f"[{sort_direction}] Duplicate found (reviewer: {reviewer_id}). Duplicates in this request: {duplicates_in_request}")
-                            
-                            # Check if THIS REQUEST has too many duplicates
-                            if duplicates_in_request > 100:
-                                print(f"[{sort_direction}] STOPPING: More than 15 duplicates found in this single request!")
-                                self.stop_scraping = True
-                                break
-                            continue
-                        
-                        # Mark as seen
-                        self.seen_review_ids.add(review_id)
-                        self.seen_reviewer_ids.add(reviewer_id)
+                        continue
+                    
+                    # Mark as seen
+                    self.seen_review_ids.add(review_id)
+                    self.seen_reviewer_ids.add(reviewer_id)
                     
                     # Convert enhanced review to existing format for compatibility
                     date_info = enhanced_review.get('date_info', {})
@@ -623,7 +601,7 @@ class DualAsyncGoogleMapsReviewScraper:
                         "fid": "",
                         "scrapedAt": datetime.now().isoformat(),
                         "timeAgo": date_info.get('relative_date', ''),
-                        "sortDirection": sort_direction,  # Track which direction this came from
+                        "sortDirection": "HIGHEST",  # Always highest rating
                         
                         # Enhanced fields from new parser
                         "isLocalGuide": user_info.get('is_local_guide', False),
@@ -640,116 +618,102 @@ class DualAsyncGoogleMapsReviewScraper:
                     reviews.append(review)
                     new_reviews_count += 1
                     
-                    # Update per-direction stats
-                    stats_key = 'highest_rating' if sort_direction == 'HIGHEST' else 'lowest_rating'
-                    self.stats[stats_key]['reviews'] += 1
+                    # Update stats
+                    self.stats['reviews'] += 1
                     
                     user_name = user_info.get('name', 'Unknown')
                     rating = enhanced_review.get('rating', 'N/A')
                     confidence = self.calculate_confidence(enhanced_review)
-                    print(f"[{sort_direction}] Extracted review {new_reviews_count}: {user_name} (Rating: {rating}, Confidence: {confidence:.2f})")
+                    print(f"Extracted review {new_reviews_count}: {user_name} (Rating: {rating}, Confidence: {confidence:.2f})")
                     
                 except Exception as e:
-                    print(f"[{sort_direction}] Error parsing section {i}: {str(e)}")
+                    print(f"Error parsing section {i}: {str(e)}")
                     continue
             
-            print(f"[{sort_direction}] Added {new_reviews_count} new reviews, {duplicates_in_request} duplicates in this request")
+            print(f"Added {new_reviews_count} new reviews, {duplicates_in_request} duplicates in this request")
                 
         except Exception as e:
-            print(f"[{sort_direction}] Error in enhanced parsing: {e}")
+            print(f"Error in enhanced parsing: {e}")
             traceback.print_exc()
         
         return reviews
 
-    async def make_request(self, session, continuation_token=None, sort_by_highest=True):
+    async def make_request(self, session, continuation_token=None):
         """Make an async request to Google Maps API"""
-        querystring = self.build_querystring(continuation_token, sort_by_highest)
-        sort_direction = "HIGHEST" if sort_by_highest else "LOWEST"
+        querystring = self.build_querystring(continuation_token)
         
         try:
-            print(f"[{sort_direction}] Making request with token: {continuation_token[:50] if continuation_token else 'None (first request)'}")
+            print(f"Making request with token: {continuation_token[:50] if continuation_token else 'None (first request)'}")
             
             async with session.get(self.base_url, params=querystring) as response:
                 if response.status == 200:
                     return await response.text()
                 else:
-                    print(f"[{sort_direction}] Request failed with status code: {response.status}")
+                    print(f"Request failed with status code: {response.status}")
                     return None
                     
         except Exception as e:
-            print(f"[{sort_direction}] Error making request: {e}")
+            print(f"Error making request: {e}")
             return None
 
-    async def scrape_direction(self, sort_by_highest=True):
-        """Scrape reviews in one direction (highest or lowest rating first)"""
-        sort_direction = "HIGHEST" if sort_by_highest else "LOWEST"
-        used_tokens = self.used_tokens_highest if sort_by_highest else self.used_tokens_lowest
-        stats_key = 'highest_rating' if sort_by_highest else 'lowest_rating'
-        
-        print(f"[{sort_direction}] Starting scraper...")
+    async def scrape_reviews(self):
+        """Scrape reviews sorted by highest rating first"""
+        print("Starting scraper (highest rating first)...")
         
         continuation_token = None
         page_number = 1
         
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(headers=self.headers, timeout=timeout) as session:
-            while not self.stop_scraping:
-                print(f"\n[{sort_direction}] --- Page {page_number} ---")
+            while True:
+                print(f"\n--- Page {page_number} ---")
                 
                 # Update page stats
-                self.stats[stats_key]['pages'] = page_number
+                self.stats['pages'] = page_number
                 
                 # Make request
-                response_content = await self.make_request(session, continuation_token, sort_by_highest)
+                response_content = await self.make_request(session, continuation_token)
                 if not response_content:
-                    print(f"[{sort_direction}] Failed to get response, stopping...")
+                    print("Failed to get response, stopping...")
                     break
                 
                 # Parse reviews from response
-                new_reviews = self.parse_reviews_from_response(response_content, sort_direction)
+                new_reviews = self.parse_reviews_from_response(response_content)
                 
                 if not new_reviews:
-                    print(f"[{sort_direction}] No new reviews found, stopping...")
+                    print("No new reviews found, stopping...")
                     break
                 
-                # Add new reviews to shared collection
-                with self.lock:
-                    if self.stop_scraping:
-                        print(f"[{sort_direction}] Stopping due to duplicate limit")
-                        break
-                        
-                    self.all_reviews.extend(new_reviews)
-                    print(f"[{sort_direction}] Added {len(new_reviews)} new reviews. Total so far: {len(self.all_reviews)}")
+                # Add new reviews to collection
+                self.all_reviews.extend(new_reviews)
+                print(f"Added {len(new_reviews)} new reviews. Total so far: {len(self.all_reviews)}")
                 
                 # Extract continuation tokens for next request
                 caesy_tokens = self.extract_caesy_tokens(response_content)
                 
                 # Save tokens for debugging
-                if sort_by_highest:
-                    self.all_tokens['highest_rating'].extend(caesy_tokens)
-                else:
-                    self.all_tokens['lowest_rating'].extend(caesy_tokens)
+                self.all_tokens.extend(caesy_tokens)
                 
                 if caesy_tokens:
-                    print(f"[{sort_direction}] Found {len(caesy_tokens)} continuation tokens")
+                    print(f"Found {len(caesy_tokens)} continuation tokens")
                     
                     # Get next unused token
-                    next_token = self.get_next_unused_token(caesy_tokens, used_tokens)
+                    next_token = self.get_next_unused_token(caesy_tokens, self.used_tokens)
                     
                     if next_token:
                         # Mark current token as used if we have one
                         if continuation_token:
-                            used_tokens.add(continuation_token)
-                            print(f"[{sort_direction}] Marked token as used: {continuation_token[:50]}...")
+                            self.used_tokens.add(continuation_token)
+                            print(f"Marked token as used: {continuation_token[:50]}...")
                         
                         continuation_token = next_token
-                        print(f"[{sort_direction}] Using next unused token: {continuation_token[:50]}...")
-                        print(f"[{sort_direction}] Total tokens used so far: {len(used_tokens)}")
+                        print(f"Using next unused token: {continuation_token[:50]}...")
+                        print(f"Total tokens used so far: {len(self.used_tokens)}")
                     else:
-                        print(f"[{sort_direction}] All available tokens have been used, stopping...")
+                        print("All available tokens have been used, stopping...")
                         break
                 else:
-                    print(f"[{sort_direction}] No continuation tokens found, stopping...")
+                    print("No continuation tokens found, stopping...")
                     break
                 
                 page_number += 1
@@ -757,7 +721,7 @@ class DualAsyncGoogleMapsReviewScraper:
                 # Add delay between requests to be respectful
                 await asyncio.sleep(2)
         
-        print(f"[{sort_direction}] Scraper finished. Total pages processed: {page_number}")
+        print(f"Scraper finished. Total pages processed: {page_number}")
 
     def save_results_to_files(self):
         """Save all collected reviews and tokens to files"""
@@ -767,7 +731,6 @@ class DualAsyncGoogleMapsReviewScraper:
             'extraction_timestamp': datetime.now().isoformat(),
             'total_reviews': len(self.all_reviews),
             'duplicate_count': self.duplicate_count,
-            'stopped_due_to_duplicates': self.stop_scraping,
             'stats': self.stats,
             'reviews': self.all_reviews
         }
@@ -783,10 +746,8 @@ class DualAsyncGoogleMapsReviewScraper:
         tokens_data = {
             'place_id': f'0x{self.place_id}',
             'extraction_timestamp': datetime.now().isoformat(),
-            'tokens_highest_rating': list(self.all_tokens['highest_rating']),
-            'tokens_lowest_rating': list(self.all_tokens['lowest_rating']),
-            'used_tokens_highest': list(self.used_tokens_highest),
-            'used_tokens_lowest': list(self.used_tokens_lowest),
+            'all_tokens': self.all_tokens,
+            'used_tokens': list(self.used_tokens),
             'stats': self.stats
         }
         
@@ -797,31 +758,22 @@ class DualAsyncGoogleMapsReviewScraper:
         except Exception as e:
             print(f"Error saving tokens: {e}")
 
-    async def scrape_all_reviews_dual(self):
-        """Main method to scrape reviews from both directions simultaneously"""
-        print(f"Starting dual async scraping for place ID: 0x{self.place_id}")
-        print("Running two concurrent scrapers:")
-        print("  1. Highest rating first (sort: 1e3)")
-        print("  2. Lowest rating first (sort: 1e4)")
-        print("Will stop when more than 10 duplicate reviewers are found in a single request")
+    async def scrape_all_reviews(self):
+        """Main method to scrape reviews sorted by highest rating"""
+        print(f"Starting review scraping for place ID: 0x{self.place_id}")
+        print("Scraping reviews sorted by highest rating first")
+        print("Will stop when no more continuation tokens are found")
         
-        # Create tasks for both directions
-        highest_task = asyncio.create_task(self.scrape_direction(sort_by_highest=True))
-        lowest_task = asyncio.create_task(self.scrape_direction(sort_by_highest=False))
-        
-        # Wait for both to complete (or until one stops due to duplicates)
-        await asyncio.gather(highest_task, lowest_task, return_exceptions=True)
+        # Start scraping
+        await self.scrape_reviews()
         
         # Save results
         self.save_results_to_files()
         
-        print(f"\n=== DUAL SCRAPING COMPLETE ===")
+        print(f"\n=== SCRAPING COMPLETE ===")
         print(f"Total reviews scraped: {len(self.all_reviews)}")
         print(f"Total duplicates found: {self.duplicate_count}")
-        print(f"Stopped due to duplicate limit: {self.stop_scraping}")
-        print(f"Stats per direction:")
-        for direction, stats in self.stats.items():
-            print(f"  {direction}: {stats['pages']} pages, {stats['reviews']} reviews, {stats['duplicates']} duplicates")
+        print(f"Stats: {self.stats['pages']} pages, {self.stats['reviews']} reviews, {self.stats['duplicates']} duplicates")
         print(f"Reviews output file: {self.output_file}")
         print(f"Tokens output file: {self.tokens_file}")
 
@@ -835,11 +787,11 @@ def main():
     elif place_id.startswith("0x"):
         place_id = place_id[2:]  # Remove "0x" prefix
     
-    # Create scraper instance and start dual scraping
-    scraper = DualAsyncGoogleMapsReviewScraper(place_id)
+    # Create scraper instance and start scraping
+    scraper = GoogleMapsReviewScraper(place_id)
     
     # Run the async scraping
-    asyncio.run(scraper.scrape_all_reviews_dual())
+    asyncio.run(scraper.scrape_all_reviews())
 
 if __name__ == "__main__":
     main()

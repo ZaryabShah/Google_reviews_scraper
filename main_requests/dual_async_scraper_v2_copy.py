@@ -87,24 +87,13 @@ class DualAsyncGoogleMapsReviewScraper:
         return None
 
     def extract_caesy_tokens(self, html_content):
-        """Extract all continuation tokens starting with CAE (includes CAESY0, CAES, CAE patterns)"""
-        # Multiple patterns to catch different token formats
-        patterns = [
-            r'CAESY0[A-Za-z0-9_\-+=]{10,}',  # Original CAESY0 tokens
-            r'CAESY[A-Za-z0-9_\-+=]{10,}',   # CAESY tokens without 0
-            r'CAES[A-Za-z0-9_\-+=]{15,}',    # CAES tokens (longer minimum)
-            r'CAE[A-Za-z0-9_\-+=]{20,}',     # General CAE tokens (even longer minimum)
-        ]
-        
-        all_tokens = []
-        for pattern in patterns:
-            tokens = re.findall(pattern, html_content)
-            all_tokens.extend(tokens)
+        """Extract all tokens starting with CAESY0"""
+        caesy_tokens = re.findall(r'CAESY0[A-Za-z0-9_\-+=]{10,}', html_content)
         
         # Remove duplicates while preserving order
         unique_tokens = []
         seen = set()
-        for token in all_tokens:
+        for token in caesy_tokens:
             if token not in seen:
                 unique_tokens.append(token)
                 seen.add(token)

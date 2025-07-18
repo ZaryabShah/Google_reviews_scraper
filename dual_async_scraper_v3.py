@@ -2,17 +2,108 @@ import asyncio
 import aiohttp
 import json
 import re
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse, parse_qs
 from datetime import datetime
 import traceback
 import time
 import os
 import threading
+import argparse
+import sys
 from typing import Set, List, Dict, Any
 
+def extract_place_id_from_url(url):
+    """Extract place ID from Google Maps URL"""
+    try:
+        # Pattern 1: Look for 1s0x followed by place ID
+        pattern1 = r'1s0x([a-f0-9]+):0x([a-f0-9]+)'
+        match1 = re.search(pattern1, url)
+        if match1:
+            return f"{match1.group(1)}:0x{match1.group(2)}"
+        
+        # Pattern 2: Look for direct 0x format
+        pattern2 = r'0x([a-f0-9]+):0x([a-f0-9]+)'
+        match2 = re.search(pattern2, url)
+        if match2:
+            return f"{match2.group(1)}:0x{match2.group(2)}"
+        
+        # Pattern 3: Look for !1s0x format (another common format)
+        pattern3 = r'!1s0x([a-f0-9]+):0x([a-f0-9]+)'
+        match3 = re.search(pattern3, url)
+        if match3:
+            return f"{match3.group(1)}:0x{match3.group(2)}"
+        
+        print(f"❌ Could not extract place ID from URL: {url}")
+        print("Please make sure the URL is a valid Google Maps place URL")
+        return None
+        
+    except Exception as e:
+        print(f"❌ Error parsing URL: {e}")
+        return None
+
+def parse_command_line_args():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description='Extract Google Maps reviews with source filtering',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python extract.py "https://maps.google.com/maps/place/..." --google
+  python extract.py "https://maps.google.com/maps/place/..." --tripadvisor
+  python extract.py "https://maps.google.com/maps/place/..." --all
+        """
+    )
+    
+    parser.add_argument(
+        'url',
+        help='Google Maps URL containing the place ID'
+    )
+    
+    # Source filtering options
+    source_group = parser.add_mutually_exclusive_group()
+    source_group.add_argument(
+        '--google',
+        action='store_const',
+        const='google',
+        dest='source_filter',
+        help='Extract only Google reviews'
+    )
+    source_group.add_argument(
+        '--tripadvisor',
+        action='store_const',
+        const='tripadvisor',
+        dest='source_filter',
+        help='Extract only TripAdvisor reviews'
+    )
+    source_group.add_argument(
+        '--all',
+        action='store_const',
+        const=None,
+        dest='source_filter',
+        help='Extract all reviews (default)'
+    )
+    
+    # Optional parameters
+    parser.add_argument(
+        '--max-pages',
+        type=int,
+        default=None,
+        help='Maximum pages to scrape per direction (default: unlimited)'
+    )
+    
+    parser.add_argument(
+        '--delay',
+        type=int,
+        default=2,
+        help='Delay between requests in seconds (default: 2)'
+    )
+    
+    return parser.parse_args()
+
 class DualAsyncGoogleMapsReviewScraper:
-    def __init__(self, place_id):
+    def __init__(self, place_id, source_filter=None):
         self.place_id = place_id.replace("0x", "") if place_id.startswith("0x") else place_id
+        self.source_filter = source_filter  # New: source filter (None, 'google', 'tripadvisor', etc.)
         self.base_url = "https://www.google.com/maps/rpc/listugcposts"
         self.headers = {
             "accept": "*/*",
@@ -44,7 +135,6 @@ class DualAsyncGoogleMapsReviewScraper:
         clean_place_id = self.place_id.replace(":", "_")
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.output_file = os.path.join(script_dir, f"dual_reviews_{clean_place_id}_{timestamp}.json")
-        self.tokens_file = os.path.join(script_dir, f"dual_tokens_{clean_place_id}_{timestamp}.json")
         
         # Track all tokens for debugging
         self.all_tokens = {
@@ -79,32 +169,20 @@ class DualAsyncGoogleMapsReviewScraper:
         }
     
     def get_next_unused_token(self, available_tokens, used_tokens_set):
-        """Get the last unused continuation token from available tokens"""
-        # Iterate from the end to get the last unused token
-        for token in reversed(available_tokens):
+        """Get the next unused continuation token from available tokens"""
+        for token in available_tokens:
             if token not in used_tokens_set:
                 return token
         return None
 
     def extract_caesy_tokens(self, html_content):
-        """Extract all continuation tokens starting with CAE (includes CAESY0, CAES, CAE patterns)"""
-        # Multiple patterns to catch different token formats
-        patterns = [
-            r'CAESY0[A-Za-z0-9_\-+=]{10,}',  # Original CAESY0 tokens
-            r'CAESY[A-Za-z0-9_\-+=]{10,}',   # CAESY tokens without 0
-            r'CAES[A-Za-z0-9_\-+=]{15,}',    # CAES tokens (longer minimum)
-            r'CAE[A-Za-z0-9_\-+=]{20,}',     # General CAE tokens (even longer minimum)
-        ]
-        
-        all_tokens = []
-        for pattern in patterns:
-            tokens = re.findall(pattern, html_content)
-            all_tokens.extend(tokens)
+        """Extract all tokens starting with CAESY0"""
+        caesy_tokens = re.findall(r'CAES[A-Za-z0-9_\-+=]{10,}', html_content)
         
         # Remove duplicates while preserving order
         unique_tokens = []
         seen = set()
-        for token in all_tokens:
+        for token in caesy_tokens:
             if token not in seen:
                 unique_tokens.append(token)
                 seen.add(token)
@@ -114,7 +192,7 @@ class DualAsyncGoogleMapsReviewScraper:
     def find_caesy_tokens(self, html_content):
         """Find all CAESY tokens in the HTML content"""
         # Pattern to match CAESY tokens 
-        pattern = r'"(CAESY[^"]*)"'
+        pattern = r'"(CAES[^"]*)"'
         tokens = re.findall(pattern, html_content)
         return tokens
     
@@ -303,21 +381,31 @@ class DualAsyncGoogleMapsReviewScraper:
         """Extract comprehensive date information"""
         date_info = {}
         
-        # Patterns for relative dates
+        # Enhanced patterns for relative dates with better coverage
         relative_patterns = [
-            r'"(\d+)\s*years?\s*ago"',
-            r'"(\d+)\s*months?\s*ago"',
-            r'"(\d+)\s*weeks?\s*ago"',
-            r'"(\d+)\s*days?\s*ago"',
+            r'"(\d+\s*years?\s*ago)"',
+            r'"(\d+\s*months?\s*ago)"', 
+            r'"(\d+\s*weeks?\s*ago)"',
+            r'"(\d+\s*days?\s*ago)"',
             r'"(a\s*year\s*ago)"',
             r'"(a\s*month\s*ago)"',
-            r'"(Edited[^"]*)"',
+            r'"(a\s*week\s*ago)"',
+            r'"(a\s*day\s*ago)"',
+            r'"(Edited\s+a\s+month\s+ago)"',
+            r'"(Edited\s+\d+\s*(?:years?|months?|weeks?|days?)\s*ago)"',
+            r'"(Edited[^"]*ago)"',
+            # More flexible patterns
+            r'null,"([^"]*(?:years?|months?|weeks?|days?)\s*ago)"',
+            r'null,"([^"]*year\s*ago)"',
+            r'null,"([^"]*month\s*ago)"',
+            r'null,"([^"]*week\s*ago)"',
+            r'null,"([^"]*day\s*ago)"',
         ]
         
         for pattern in relative_patterns:
-            matches = re.findall(pattern, section)
+            matches = re.findall(pattern, section, re.IGNORECASE)
             if matches:
-                date_info['relative_date'] = matches[0]
+                date_info['relative_date'] = matches[0].strip()
                 break
         
         # Look for timestamp patterns
@@ -340,6 +428,57 @@ class DualAsyncGoogleMapsReviewScraper:
                     continue
         
         return date_info
+
+    def extract_review_source(self, section):
+        """Extract review source information (Google, Tripadvisor, etc.)"""
+        source_info = {}
+        
+        # Pattern to extract source information from structured data
+        # Looking for patterns like: ["Google","url",null,"google",5] or ["Tripadvisor","url",123,"tripadvisor",5]
+        source_patterns = [
+            r'\["(Google)","[^"]*","[^"]*","google",\d+\]',
+            r'\["(Tripadvisor)","[^"]*",(?:\d+|null),"tripadvisor",\d+\]',
+            r'\["([^"]+)","[^"]*",(?:\d+|null),"([^"]+)",\d+\]',
+            # More flexible patterns
+            r'null,\["([^"]+)","[^"]*googleusercontent[^"]*"',  # Google profile images
+            r'null,\["([^"]+)","[^"]*tripadvisor[^"]*"',       # TripAdvisor URLs
+        ]
+        
+        for pattern in source_patterns:
+            matches = re.findall(pattern, section, re.IGNORECASE)
+            if matches:
+                if isinstance(matches[0], tuple):
+                    source_name = matches[0][0]
+                else:
+                    source_name = matches[0]
+                
+                # Normalize source names
+                source_name_lower = source_name.lower()
+                if 'google' in source_name_lower:
+                    source_info['source'] = 'Google'
+                    source_info['source_type'] = 'google'
+                elif 'tripadvisor' in source_name_lower:
+                    source_info['source'] = 'Tripadvisor'
+                    source_info['source_type'] = 'tripadvisor'
+                else:
+                    source_info['source'] = source_name
+                    source_info['source_type'] = source_name_lower
+                break
+        
+        # If no structured source found, try to infer from URLs
+        if not source_info.get('source'):
+            if 'tripadvisor.com' in section or 'tripadvisor.de' in section:
+                source_info['source'] = 'Tripadvisor'
+                source_info['source_type'] = 'tripadvisor'
+            elif 'google.com' in section or 'googleusercontent.com' in section:
+                source_info['source'] = 'Google'
+                source_info['source_type'] = 'google'
+            else:
+                # Default to Google if no clear source is found
+                source_info['source'] = 'Google'
+                source_info['source_type'] = 'google'
+        
+        return source_info
 
     def extract_business_info(self, section):
         """Extract business/location information"""
@@ -463,6 +602,7 @@ class DualAsyncGoogleMapsReviewScraper:
         review['likes_count'] = self.extract_likes_count(section)
         review['user_info'] = self.extract_user_info(section)
         review['date_info'] = self.extract_date_info(section)
+        review['source_info'] = self.extract_review_source(section)  # New field
         review['business_info'] = self.extract_business_info(section)
         review['features'] = self.extract_review_features(section)
         
@@ -588,8 +728,8 @@ class DualAsyncGoogleMapsReviewScraper:
                             print(f"[{sort_direction}] Duplicate found (reviewer: {reviewer_id}). Duplicates in this request: {duplicates_in_request}")
                             
                             # Check if THIS REQUEST has too many duplicates
-                            if duplicates_in_request > 500:
-                                print(f"[{sort_direction}] STOPPING: More than 500 duplicates found in this single request!")
+                            if duplicates_in_request > 100:
+                                print(f"[{sort_direction}] STOPPING: More than 15 duplicates found in this single request!")
                                 self.stop_scraping = True
                                 break
                             continue
@@ -598,55 +738,19 @@ class DualAsyncGoogleMapsReviewScraper:
                         self.seen_review_ids.add(review_id)
                         self.seen_reviewer_ids.add(reviewer_id)
                     
-                    # Convert enhanced review to existing format for compatibility
+                    # Convert enhanced review to simplified format with only 6 requested fields
                     date_info = enhanced_review.get('date_info', {})
+                    source_info = enhanced_review.get('source_info', {})
                     published_date = date_info.get('iso_date', datetime.now().isoformat())
                     
+                    # Only include the 6 requested fields
                     review = {
-                        "reviewerId": reviewer_id,
-                        "reviewerUrl": f"https://www.google.com/maps/contrib/{reviewer_id}?hl=en",
                         "reviewerName": user_info.get('name', f"Reviewer {i+1}"),
-                        "reviewerNumberOfReviews": user_info.get('review_count', 0),
-                        "reviewerPhotoUrl": user_info.get('profile_image', ''),
-                        "text": enhanced_review.get('review_text', ''),
-                        "reviewImageUrls": enhanced_review.get('review_images', []),
-                        "publishedAtDate": published_date,
-                        "lastEditedAtDate": published_date,  # Use same if no edit date
-                        "likesCount": enhanced_review.get('likes_count', 0),
-                        "reviewId": review_id,
-                        "reviewUrl": f"https://www.google.com/maps/reviews/data=!4m8!14m7!1m6!2m5!1s{review_id}" if review_id.startswith('Ch') else "",
-                        "stars": enhanced_review.get('rating', 5),
-                        "placeId": place_data.get('place_id', f'0x{self.place_id}'),
-                        "location": {
-                            "lat": place_data.get('latitude', 40.0),
-                            "lng": place_data.get('longitude', 40.0)
-                        },
-                        "address": "",
-                        "neighborhood": "",
-                        "street": "",
-                        "city": "",
-                        "postalCode": "",
-                        "categories": [],
-                        "title": "",
-                        "totalScore": 0.0,
-                        "url": "",
-                        "price": None,
-                        "cid": place_data.get('place_id', ''),
-                        "fid": "",
-                        "scrapedAt": datetime.now().isoformat(),
+                        "rating": enhanced_review.get('rating', 5),
+                        "published_at": published_date,
                         "timeAgo": date_info.get('relative_date', ''),
-                        "sortDirection": sort_direction,  # Track which direction this came from
-                        
-                        # Enhanced fields from new parser
-                        "isLocalGuide": user_info.get('is_local_guide', False),
-                        "localGuideLevel": user_info.get('local_guide_level', None),
-                        "ownerResponse": enhanced_review.get('owner_response'),
-                        "hasImages": enhanced_review.get('has_images', False),
-                        "hasOwnerResponse": enhanced_review.get('has_owner_response', False),
-                        "extractionConfidence": self.calculate_confidence(enhanced_review),
-                        "features": enhanced_review.get('features', {}),
-                        "businessInfo": enhanced_review.get('business_info', {}),
-                        "sectionIndex": i
+                        "source": source_info.get('source', 'Google'),
+                        "text": enhanced_review.get('review_text', '')
                     }
                     
                     reviews.append(review)
@@ -658,8 +762,9 @@ class DualAsyncGoogleMapsReviewScraper:
                     
                     user_name = user_info.get('name', 'Unknown')
                     rating = enhanced_review.get('rating', 'N/A')
-                    confidence = self.calculate_confidence(enhanced_review)
-                    print(f"[{sort_direction}] Extracted review {new_reviews_count}: {user_name} (Rating: {rating}, Confidence: {confidence:.2f})")
+                    source = source_info.get('source', 'Unknown')
+                    timing = date_info.get('relative_date', 'Unknown')
+                    print(f"[{sort_direction}] Extracted review {new_reviews_count}: {user_name} (Rating: {rating}, Source: {source}, Timing: {timing})")
                     
                 except Exception as e:
                     print(f"[{sort_direction}] Error parsing section {i}: {str(e)}")
@@ -771,43 +876,46 @@ class DualAsyncGoogleMapsReviewScraper:
         
         print(f"[{sort_direction}] Scraper finished. Total pages processed: {page_number}")
 
+    def filter_reviews_by_source(self, reviews):
+        """Filter reviews by source if source_filter is specified"""
+        if not self.source_filter:
+            return reviews  # No filtering, return all reviews
+        
+        filtered_reviews = []
+        original_count = len(reviews)
+        
+        for review in reviews:
+            review_source = review.get('source', '').lower()
+            
+            # Check if review matches the source filter
+            if self.source_filter == 'google' and review_source == 'google':
+                filtered_reviews.append(review)
+            elif self.source_filter == 'tripadvisor' and review_source == 'tripadvisor':
+                filtered_reviews.append(review)
+            elif self.source_filter == review_source:  # For other sources
+                filtered_reviews.append(review)
+        
+        filtered_count = len(filtered_reviews)
+        print(f"📊 Source filtering: {original_count} total → {filtered_count} {self.source_filter.title()} reviews")
+        
+        return filtered_reviews
+
     def save_results_to_files(self):
-        """Save all collected reviews and tokens to files"""
-        # Save reviews
-        reviews_data = {
-            'place_id': f'0x{self.place_id}',
-            'extraction_timestamp': datetime.now().isoformat(),
-            'total_reviews': len(self.all_reviews),
-            'duplicate_count': self.duplicate_count,
-            'stopped_due_to_duplicates': self.stop_scraping,
-            'stats': self.stats,
-            'reviews': self.all_reviews
-        }
+        """Save only the reviews array to file with optional source filtering"""
+        # Apply source filtering if specified
+        reviews_to_save = self.filter_reviews_by_source(self.all_reviews)
         
         try:
             with open(self.output_file, 'w', encoding='utf-8') as file:
-                json.dump(reviews_data, file, indent=2, ensure_ascii=False)
-            print(f"✅ Reviews saved to: {self.output_file}")
+                json.dump(reviews_to_save, file, indent=2, ensure_ascii=False)
+            
+            if self.source_filter:
+                print(f"✅ {self.source_filter.title()} reviews saved to: {self.output_file}")
+            else:
+                print(f"✅ All reviews saved to: {self.output_file}")
+                
         except Exception as e:
             print(f"Error saving reviews: {e}")
-        
-        # Save tokens
-        tokens_data = {
-            'place_id': f'0x{self.place_id}',
-            'extraction_timestamp': datetime.now().isoformat(),
-            'tokens_highest_rating': list(self.all_tokens['highest_rating']),
-            'tokens_lowest_rating': list(self.all_tokens['lowest_rating']),
-            'used_tokens_highest': list(self.used_tokens_highest),
-            'used_tokens_lowest': list(self.used_tokens_lowest),
-            'stats': self.stats
-        }
-        
-        try:
-            with open(self.tokens_file, 'w', encoding='utf-8') as file:
-                json.dump(tokens_data, file, indent=2, ensure_ascii=False)
-            print(f"✅ Tokens saved to: {self.tokens_file}")
-        except Exception as e:
-            print(f"Error saving tokens: {e}")
 
     async def scrape_all_reviews_dual(self):
         """Main method to scrape reviews from both directions simultaneously"""
@@ -835,23 +943,80 @@ class DualAsyncGoogleMapsReviewScraper:
         for direction, stats in self.stats.items():
             print(f"  {direction}: {stats['pages']} pages, {stats['reviews']} reviews, {stats['duplicates']} duplicates")
         print(f"Reviews output file: {self.output_file}")
-        print(f"Tokens output file: {self.tokens_file}")
+    
+    async def scrape_reviews_dual_direction(self, google_maps_url=None, max_pages_per_direction=None, delay_between_requests=2):
+        """
+        Wrapper method for scraping reviews with parameters
+        This method maintains compatibility with the existing interface
+        """
+        # Update delay if specified
+        if delay_between_requests != 2:
+            # We can store this and use it in scrape_direction if needed
+            pass
+        
+        # Run the dual scraping
+        await self.scrape_all_reviews_dual()
+        
+        return self.all_reviews
 
 def main():
-    # Get place ID from user input
-    place_id = input("Enter the place ID (e.g., 89c3ca9c11f90c25:0x6cc8dba851799f09): ").strip()
-    
-    # Clean the place ID
-    if place_id.startswith("1s0x"):
-        place_id = place_id[4:]  # Remove "1s0x" prefix
-    elif place_id.startswith("0x"):
-        place_id = place_id[2:]  # Remove "0x" prefix
-    
-    # Create scraper instance and start dual scraping
-    scraper = DualAsyncGoogleMapsReviewScraper(place_id)
-    
-    # Run the async scraping
-    asyncio.run(scraper.scrape_all_reviews_dual())
+    """Main function with command-line interface"""
+    # Check if command line arguments are provided
+    if len(sys.argv) > 1:
+        # Parse command line arguments
+        args = parse_command_line_args()
+        
+        print("🚀 Google Maps Review Scraper")
+        print("=" * 50)
+        print(f"📍 URL: {args.url}")
+        
+        # Extract place ID from URL
+        place_id = extract_place_id_from_url(args.url)
+        if not place_id:
+            print("❌ Failed to extract place ID from URL")
+            sys.exit(1)
+        
+        print(f"🔍 Extracted Place ID: {place_id}")
+        
+        # Show source filter info
+        if args.source_filter:
+            print(f"🎯 Source Filter: {args.source_filter.title()} reviews only")
+        else:
+            print("🎯 Source Filter: All reviews")
+        
+        # Clean the place ID
+        if place_id.startswith("1s0x"):
+            place_id = place_id[4:]  # Remove "1s0x" prefix
+        elif place_id.startswith("0x"):
+            place_id = place_id[2:]  # Remove "0x" prefix
+        
+        # Create scraper instance with source filter
+        scraper = DualAsyncGoogleMapsReviewScraper(place_id, source_filter=args.source_filter)
+        
+        # Run the async scraping
+        asyncio.run(scraper.scrape_all_reviews_dual())
+        
+    else:
+        # Interactive mode (existing functionality)
+        print("🚀 Google Maps Review Scraper (Interactive Mode)")
+        print("=" * 50)
+        print("💡 Tip: You can also use command line: python extract.py 'URL' --google")
+        print()
+        
+        # Get place ID from user input
+        place_id = input("Enter the place ID (e.g., 89c3ca9c11f90c25:0x6cc8dba851799f09): ").strip()
+        
+        # Clean the place ID
+        if place_id.startswith("1s0x"):
+            place_id = place_id[4:]  # Remove "1s0x" prefix
+        elif place_id.startswith("0x"):
+            place_id = place_id[2:]  # Remove "0x" prefix
+        
+        # Create scraper instance without source filter (gets all reviews)
+        scraper = DualAsyncGoogleMapsReviewScraper(place_id)
+        
+        # Run the async scraping
+        asyncio.run(scraper.scrape_all_reviews_dual())
 
 if __name__ == "__main__":
     main()
