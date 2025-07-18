@@ -230,8 +230,45 @@ class DualAsyncGoogleMapsReviewScraper:
         return sections
 
     def extract_star_rating(self, section):
-        """Extract star rating with precise pattern matching for Google Maps structure"""
-        # Primary pattern: [[N], where N is the star rating at the start of review data
+        """Extract star rating with enhanced pattern matching focusing on accurate X/5 format"""
+        
+        # Primary Pattern: Focus on "X/5" format which is most accurate for Tripadvisor
+        # This matches patterns like: [null,3,"3/5"], [null,4,"4/5"], etc.
+        rating_fraction_pattern = r'"(\d)/5"'
+        fraction_matches = re.findall(rating_fraction_pattern, section)
+        if fraction_matches:
+            try:
+                rating = int(fraction_matches[0])  # Take the first match
+                if 1 <= rating <= 5:
+                    return rating
+            except (ValueError, TypeError):
+                pass
+        
+        # Secondary Pattern: Rating array pattern - [null,N,"N/5"] - extract from the middle number
+        rating_array_pattern = r'\[null,(\d),"(\d)/5"\]'
+        rating_array_matches = re.findall(rating_array_pattern, section)
+        if rating_array_matches:
+            try:
+                # Verify both numbers match (for data integrity)
+                middle_rating = int(rating_array_matches[0][0])
+                fraction_rating = int(rating_array_matches[0][1])
+                if middle_rating == fraction_rating and 1 <= middle_rating <= 5:
+                    return middle_rating
+            except (ValueError, TypeError):
+                pass
+        
+        # Tertiary Pattern: Tripadvisor source info pattern - ["Tripadvisor","url","tripadvisor",N]
+        tripadvisor_pattern = r'"tripadvisor",(\d)\]'
+        tripadvisor_matches = re.findall(tripadvisor_pattern, section)
+        if tripadvisor_matches:
+            try:
+                rating = int(tripadvisor_matches[0])
+                if 1 <= rating <= 5:
+                    return rating
+            except (ValueError, TypeError):
+                pass
+        
+        # Fallback Pattern: Google primary pattern - [[N], where N is the star rating at the start of review data
         # This matches patterns like: [[1],null,null,null,null,null,[[["GUIDE...
         # or [[2],null,null,null,null,null,null,null,null,null,null,null,null,null,["en"],[["The...
         primary_pattern = r'\[\[(\d)\],'
@@ -246,7 +283,7 @@ class DualAsyncGoogleMapsReviewScraper:
             except (ValueError, TypeError):
                 pass
         
-        # Fallback patterns if primary doesn't work
+        # Final Fallback patterns if above don't work
         fallback_patterns = [
             r'\[\[(\d)\]\]',  # [[5]], [[2]], etc.
             r'"rating":(\d)',  # "rating":5
